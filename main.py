@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
@@ -41,7 +42,9 @@ ZOOM_USER_ID = "me"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173"              # Optional: local dev
+        "http://localhost:5173",
+        "http://admission.buildingindiadigital.com",
+        "https://admission.buildingindiadigital.com"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -77,14 +80,18 @@ class UserCreate(BaseModel):
     username: str
     email: str
     password: str
+    mobile_number: str
     state_id: int
+    city_id: int
 
 class UserCreateWithRole(BaseModel):
     username: str
     email: str
     password: str
+    mobile_number: str
     role: str  # 'teacher', 'student', or 'admin'
     state_id: Optional[int] = None  # Required for teachers/students, optional for admin
+    city_id: Optional[int] = None   # Required for teachers/students, optional for admin
     admin_secret_key: Optional[str] = None  # Required only for admin registration
 
 class AdminCreate(BaseModel):
@@ -102,6 +109,7 @@ class UserLoginWithRole(BaseModel):
     password: str
     role: str  # 'teacher', 'student', or 'admin'
     state_id: Optional[int] = None  # Required for teachers and students, not for admin
+    city_id: Optional[int] = None   # Required for teachers and students, not for admin
 
 class PasswordResetRequest(BaseModel):
     username: str
@@ -185,12 +193,12 @@ def generate_user_id(role: str) -> str:
     else:
         return f"ADMIN{unique_id}"
 
-# Database setup with roles table
+# Enhanced Database setup with mobile, cities and locations
 def init_db():
     conn = sqlite3.connect('verification_system.db')
     cursor = conn.cursor()
     
-    # Roles table - NEW
+    # Roles table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS roles (
             id TEXT PRIMARY KEY,
@@ -208,25 +216,48 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS states (
             id INTEGER PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL
+            name TEXT UNIQUE NOT NULL,
+            code TEXT UNIQUE NOT NULL
         )
     ''')
     
-    # Users table - updated to include reset token fields
+    # Enhanced Cities table with more comprehensive data
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS cities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            state_id INTEGER NOT NULL,
+            district TEXT,
+            is_major BOOLEAN DEFAULT FALSE,
+            is_capital BOOLEAN DEFAULT FALSE,
+            population INTEGER,
+            latitude REAL,
+            longitude REAL,
+            postal_code_prefix TEXT,
+            FOREIGN KEY (state_id) REFERENCES states (id),
+            UNIQUE(name, state_id)
+        )
+    ''')
+    
+    # Enhanced Users table with mobile number and city
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             email TEXT UNIQUE NOT NULL,
+            mobile_number TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
             role TEXT NOT NULL CHECK(role IN ('admin', 'teacher', 'student')),
             state_id INTEGER,
+            city_id INTEGER,
             age INTEGER,
             birthdate TEXT,
+            full_address TEXT,
             reset_token TEXT,
             reset_token_expires TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (state_id) REFERENCES states (id)
+            FOREIGN KEY (state_id) REFERENCES states (id),
+            FOREIGN KEY (city_id) REFERENCES cities (id)
         )
     ''')
     
@@ -357,14 +388,28 @@ def init_db():
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ''', roles_data)
     
-    # Insert states
+    # Insert comprehensive states data with codes
     states_data = [
-        (1, "Delhi"), (2, "Haryana"), (6, "Himachal Pradesh"),
-        (7, "Jammu and Kashmir"), (3, "Punjab"), (8, "Rajasthan"),
-        (4, "Uttar Pradesh"), (5, "Uttarakhand")
+        (1, "Delhi", "DL"),
+        (2, "Haryana", "HR"),
+        (3, "Punjab", "PB"),
+        (4, "Uttar Pradesh", "UP"),
+        (5, "Uttarakhand", "UK"),
+        (6, "Himachal Pradesh", "HP"),
+        (7, "Jammu and Kashmir", "JK"),
+        (8, "Rajasthan", "RJ")
     ]
     
-    cursor.executemany('INSERT OR IGNORE INTO states (id, name) VALUES (?, ?)', states_data)
+    cursor.executemany('INSERT OR IGNORE INTO states (id, name, code) VALUES (?, ?, ?)', states_data)
+    
+    # Insert comprehensive cities data for all states
+    cities_data = get_comprehensive_cities_data()
+    for city in cities_data:
+        cursor.execute('''
+            INSERT OR IGNORE INTO cities 
+            (name, state_id, district, is_major, is_capital, population, latitude, longitude, postal_code_prefix)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', city)
     
     # Insert sample test questions
     sample_questions = get_sample_questions()
@@ -377,6 +422,146 @@ def init_db():
     
     conn.commit()
     conn.close()
+
+def get_comprehensive_cities_data():
+    """Get comprehensive cities data for all states"""
+    return [
+        # Delhi (State ID: 1)
+        ("New Delhi", 1, "Central Delhi", True, True, 249998, 28.6139, 77.2090, "110"),
+        ("Old Delhi", 1, "North Delhi", True, False, 176000, 28.6562, 77.2410, "110"),
+        ("Dwarka", 1, "South West Delhi", True, False, 150000, 28.5921, 77.0460, "110"),
+        ("Rohini", 1, "North West Delhi", True, False, 800000, 28.7041, 77.1025, "110"),
+        ("Karol Bagh", 1, "Central Delhi", True, False, 125000, 28.6519, 77.1909, "110"),
+        ("Janakpuri", 1, "West Delhi", True, False, 150000, 28.6219, 77.0855, "110"),
+        ("Lajpat Nagar", 1, "South Delhi", True, False, 120000, 28.5653, 77.2434, "110"),
+        ("Greater Kailash", 1, "South Delhi", True, False, 80000, 28.5494, 77.2461, "110"),
+        ("Vasant Kunj", 1, "South West Delhi", True, False, 118000, 28.5200, 77.1591, "110"),
+        ("Pitampura", 1, "North West Delhi", False, False, 400000, 28.6988, 77.1319, "110"),
+        
+        # Haryana (State ID: 2)
+        ("Chandigarh", 2, "Chandigarh", True, True, 1055450, 30.7333, 76.7794, "160"),
+        ("Faridabad", 2, "Faridabad", True, False, 1404653, 28.4089, 77.3178, "121"),
+        ("Gurgaon", 2, "Gurugram", True, False, 876969, 28.4595, 77.0266, "122"),
+        ("Panipat", 2, "Panipat", True, False, 294151, 29.3909, 76.9635, "132"),
+        ("Ambala", 2, "Ambala", True, False, 207934, 30.3782, 76.7767, "134"),
+        ("Yamunanagar", 2, "Yamunanagar", True, False, 383318, 30.1290, 77.2674, "135"),
+        ("Rohtak", 2, "Rohtak", True, False, 374292, 28.8955, 76.6066, "124"),
+        ("Hisar", 2, "Hisar", True, False, 301249, 29.1492, 75.7217, "125"),
+        ("Karnal", 2, "Karnal", True, False, 302140, 29.6857, 76.9905, "132"),
+        ("Sonipat", 2, "Sonipat", True, False, 279298, 28.9955, 77.0191, "131"),
+        ("Panchkula", 2, "Panchkula", False, False, 211355, 30.6942, 76.8606, "134"),
+        ("Bhiwani", 2, "Bhiwani", False, False, 169135, 28.7933, 76.1319, "127"),
+        ("Sirsa", 2, "Sirsa", False, False, 185851, 29.5347, 75.0260, "125"),
+        ("Jind", 2, "Jind", False, False, 170331, 29.3164, 76.3150, "126"),
+        ("Thanesar", 2, "Kurukshetra", False, False, 154962, 29.9739, 76.8280, "136"),
+        
+        # Punjab (State ID: 3)
+        ("Ludhiana", 3, "Ludhiana", True, False, 1618879, 30.9009, 75.8573, "141"),
+        ("Amritsar", 3, "Amritsar", True, False, 1183705, 31.6340, 74.8723, "143"),
+        ("Jalandhar", 3, "Jalandhar", True, False, 873725, 31.3260, 75.5762, "144"),
+        ("Patiala", 3, "Patiala", True, False, 449238, 30.3398, 76.3869, "147"),
+        ("Bathinda", 3, "Bathinda", True, False, 285788, 30.2118, 74.9455, "151"),
+        ("Hoshiarpur", 3, "Hoshiarpur", True, False, 168443, 31.5219, 75.9118, "146"),
+        ("Mohali", 3, "Mohali", True, False, 146213, 30.6793, 76.7414, "160"),
+        ("Firozpur", 3, "Firozpur", True, False, 110313, 30.9329, 74.6197, "152"),
+        ("Pathankot", 3, "Pathankot", True, False, 197982, 32.2746, 75.6527, "145"),
+        ("Moga", 3, "Moga", False, False, 142934, 30.8037, 75.1697, "142"),
+        ("Abohar", 3, "Fazilka", False, False, 145302, 30.1204, 74.1995, "152"),
+        ("Malerkotla", 3, "Sangrur", False, False, 135424, 30.5311, 75.8792, "148"),
+        ("Khanna", 3, "Ludhiana", False, False, 128137, 30.7051, 76.222, "141"),
+        ("Phagwara", 3, "Kapurthala", False, False, 100747, 31.2244, 75.7729, "144"),
+        ("Muktsar", 3, "Sri Muktsar Sahib", False, False, 99846, 30.4762, 74.5226, "152"),
+        
+        # Uttar Pradesh (State ID: 4)
+        ("Lucknow", 4, "Lucknow", True, True, 2817105, 26.8467, 80.9462, "226"),
+        ("Kanpur", 4, "Kanpur Nagar", True, False, 2767031, 26.4499, 80.3319, "208"),
+        ("Ghaziabad", 4, "Ghaziabad", True, False, 1729000, 28.6692, 77.4538, "201"),
+        ("Agra", 4, "Agra", True, False, 1585704, 27.1767, 78.0081, "282"),
+        ("Varanasi", 4, "Varanasi", True, False, 1198491, 25.3176, 82.9739, "221"),
+        ("Meerut", 4, "Meerut", True, False, 1305429, 28.9845, 77.7064, "250"),
+        ("Allahabad", 4, "Prayagraj", True, False, 1216719, 25.4358, 81.8463, "211"),
+        ("Bareilly", 4, "Bareilly", True, False, 903668, 28.3670, 79.4304, "243"),
+        ("Aligarh", 4, "Aligarh", True, False, 874408, 27.8974, 78.0880, "202"),
+        ("Moradabad", 4, "Moradabad", True, False, 889810, 28.8389, 78.7378, "244"),
+        ("Saharanpur", 4, "Saharanpur", True, False, 705478, 29.9680, 77.5460, "247"),
+        ("Gorakhpur", 4, "Gorakhpur", True, False, 674246, 26.7606, 83.3732, "273"),
+        ("Noida", 4, "Gautam Buddha Nagar", True, False, 642381, 28.5355, 77.3910, "201"),
+        ("Firozabad", 4, "Firozabad", False, False, 604214, 27.1592, 78.3957, "283"),
+        ("Jhansi", 4, "Jhansi", False, False, 507293, 25.4484, 78.5685, "284"),
+        
+        # Uttarakhand (State ID: 5)
+        ("Dehradun", 5, "Dehradun", True, True, 578420, 30.3165, 78.0322, "248"),
+        ("Haridwar", 5, "Haridwar", True, False, 228832, 29.9457, 78.1642, "249"),
+        ("Roorkee", 5, "Haridwar", True, False, 118600, 29.8543, 77.8880, "247"),
+        ("Haldwani", 5, "Nainital", True, False, 156078, 29.2183, 79.5130, "263"),
+        ("Rudrapur", 5, "Udham Singh Nagar", True, False, 154485, 28.9845, 79.4066, "263"),
+        ("Kashipur", 5, "Udham Singh Nagar", False, False, 121610, 29.2108, 78.9478, "244"),
+        ("Rishikesh", 5, "Dehradun", False, False, 102138, 30.0869, 78.2676, "249"),
+        ("Kotdwar", 5, "Pauri Garhwal", False, False, 33692, 29.7460, 78.5281, "246"),
+        ("Nainital", 5, "Nainital", False, False, 41377, 29.3803, 79.4636, "263"),
+        ("Almora", 5, "Almora", False, False, 35513, 29.5971, 79.6593, "263"),
+        ("Pithoragarh", 5, "Pithoragarh", False, False, 56328, 29.5830, 80.2186, "262"),
+        ("Pauri", 5, "Pauri Garhwal", False, False, 23726, 30.1493, 78.7812, "246"),
+        ("Tehri", 5, "Tehri Garhwal", False, False, 36983, 30.3903, 78.4803, "249"),
+        ("Bageshwar", 5, "Bageshwar", False, False, 17846, 29.8389, 79.7709, "263"),
+        ("Champawat", 5, "Champawat", False, False, 27309, 29.3368, 80.0925, "262"),
+        
+        # Himachal Pradesh (State ID: 6)
+        ("Shimla", 6, "Shimla", True, True, 171817, 31.1048, 77.1734, "171"),
+        ("Solan", 6, "Solan", True, False, 58780, 30.9045, 77.0967, "173"),
+        ("Dharamshala", 6, "Kangra", True, False, 30764, 32.2190, 76.3234, "176"),
+        ("Mandi", 6, "Mandi", True, False, 26422, 31.7084, 76.9319, "175"),
+        ("Palampur", 6, "Kangra", True, False, 41024, 32.1098, 76.5348, "176"),
+        ("Baddi", 6, "Solan", False, False, 31681, 30.9579, 76.7919, "173"),
+        ("Kullu", 6, "Kullu", False, False, 18306, 31.9578, 77.1092, "175"),
+        ("Hamirpur", 6, "Hamirpur", False, False, 20046, 31.6851, 76.5205, "177"),
+        ("Bilaspur", 6, "Bilaspur", False, False, 13835, 31.3394, 76.7569, "174"),
+        ("Una", 6, "Una", False, False, 20579, 31.4685, 76.2708, "177"),
+        ("Chamba", 6, "Chamba", False, False, 21078, 32.5556, 76.1306, "176"),
+        ("Keylong", 6, "Lahaul and Spiti", False, False, 1400, 32.5706, 77.0288, "175"),
+        ("Kalpa", 6, "Kinnaur", False, False, 1119, 31.5329, 78.2649, "172"),
+        ("Nahan", 6, "Sirmaur", False, False, 28899, 30.5594, 77.2945, "173"),
+        ("Kasauli", 6, "Solan", False, False, 1952, 30.8993, 76.9659, "173"),
+        
+        # Jammu and Kashmir (State ID: 7)
+        ("Srinagar", 7, "Srinagar", True, True, 971357, 34.0837, 74.7973, "190"),
+        ("Jammu", 7, "Jammu", True, False, 502197, 32.7266, 74.8570, "180"),
+        ("Anantnag", 7, "Anantnag", True, False, 108505, 33.7311, 75.1480, "192"),
+        ("Baramulla", 7, "Baramulla", True, False, 71434, 34.2093, 74.3536, "193"),
+        ("Sopore", 7, "Baramulla", False, False, 61919, 34.3032, 74.4660, "193"),
+        ("Kathua", 7, "Kathua", False, False, 58780, 32.3705, 75.5223, "184"),
+        ("Udhampur", 7, "Udhampur", False, False, 79538, 32.9155, 75.1416, "182"),
+        ("Punch", 7, "Poonch", False, False, 26435, 33.7695, 74.0936, "185"),
+        ("Rajouri", 7, "Rajouri", False, False, 37999, 33.3775, 74.3117, "185"),
+        ("Kupwara", 7, "Kupwara", False, False, 78804, 34.5265, 74.2467, "193"),
+        ("Bandipore", 7, "Bandipora", False, False, 39538, 34.4178, 74.6391, "193"),
+        ("Ganderbal", 7, "Ganderbal", False, False, 297003, 34.2374, 74.7847, "191"),
+        ("Kulgam", 7, "Kulgam", False, False, 422786, 33.6409, 75.0183, "192"),
+        ("Pulwama", 7, "Pulwama", False, False, 570060, 33.8712, 74.8947, "192"),
+        ("Shopian", 7, "Shopian", False, False, 265960, 33.7181, 74.8303, "192"),
+        
+        # Rajasthan (State ID: 8)
+        ("Jaipur", 8, "Jaipur", True, True, 3073350, 26.9124, 75.7873, "302"),
+        ("Jodhpur", 8, "Jodhpur", True, False, 1033918, 26.2389, 73.0243, "342"),
+        ("Kota", 8, "Kota", True, False, 1001365, 25.2138, 75.8648, "324"),
+        ("Bikaner", 8, "Bikaner", True, False, 644406, 28.0229, 73.3119, "334"),
+        ("Ajmer", 8, "Ajmer", True, False, 551360, 26.4499, 74.6399, "305"),
+        ("Udaipur", 8, "Udaipur", True, False, 474531, 24.5854, 73.7125, "313"),
+        ("Bhilwara", 8, "Bhilwara", True, False, 360009, 25.3407, 74.6269, "311"),
+        ("Alwar", 8, "Alwar", True, False, 341422, 27.5530, 76.6346, "301"),
+        ("Bharatpur", 8, "Bharatpur", False, False, 252342, 27.2152, 77.4977, "321"),
+        ("Sikar", 8, "Sikar", False, False, 237579, 27.6094, 75.1399, "332"),
+        ("Pali", 8, "Pali", False, False, 229956, 25.7711, 73.3234, "306"),
+        ("Tonk", 8, "Tonk", False, False, 135663, 26.1673, 75.7847, "304"),
+        ("Kishangarh", 8, "Ajmer", False, False, 131749, 26.5943, 74.8637, "305"),
+        ("Beawar", 8, "Ajmer", False, False, 125394, 26.1017, 74.3200, "305"),
+        ("Hanumangarh", 8, "Hanumangarh", False, False, 150201, 29.5823, 74.3089, "335"),
+        ("Gangapur City", 8, "Sawai Madhopur", False, False, 116928, 26.4744, 76.7179, "322"),
+        ("Sawai Madhopur", 8, "Sawai Madhopur", False, False, 120106, 26.0173, 76.3660, "322"),
+        ("Makrana", 8, "Nagaur", False, False, 46806, 27.0420, 74.7126, "341"),
+        ("Sujangarh", 8, "Churu", False, False, 42743, 27.7000, 74.4667, "331"),
+        ("Lachhmangarh", 8, "Sikar", False, False, 41547, 27.8229, 75.1671, "332")
+    ]
 
 def get_sample_questions():
     """Sample aptitude test questions for grades 10-12"""
@@ -727,13 +912,14 @@ def predict_result(score_percentage: float, subject_scores: Dict) -> str:
 async def root():
     return {
         "message": "ID Document Age Verification, Aptitude Test & Zoom Meeting System API",
-        "version": "4.1.0",
+        "version": "4.2.0",
         "endpoints": {
             "states": "/states - Get all available states for dropdown",
+            "cities": "/states/{state_id}/cities - Get cities for selected state",
             "roles": "/roles - Get all available user roles for dropdown", 
             "register": "/register (with role selection: teacher, student, admin)",
             "admin_register": "/admin/register (deprecated - use /register with admin role)",
-            "login": "/login (with role and state selection for all roles)",
+            "login": "/login (with role, state, and city selection)",
             "password_reset_request": "/password-reset-request",
             "reset_password": "/reset-password",
             "validate_reset_token": "/password-reset/validate-token/{token}",
@@ -752,13 +938,13 @@ async def root():
         },
         "registration_requirements": {
             "admin": ["username", "email", "password", "admin_secret_key"],
-            "teacher": ["username", "email", "password", "state_id", "document"],
-            "student": ["username", "email", "password", "state_id", "document"]
+            "teacher": ["username", "email", "mobile", "password", "state_id", "city_id", "location (optional)", "document"],
+            "student": ["username", "email", "mobile", "password", "state_id", "city_id", "location (optional)", "document"]
         },
         "login_requirements": {
             "admin": ["username", "password", "role"],
-            "teacher": ["username", "password", "role", "state_id"],
-            "student": ["username", "password", "role", "state_id"]
+            "teacher": ["username", "password", "role", "state_id", "city_id (optional)"],
+            "student": ["username", "password", "role", "state_id", "city_id (optional)"]
         }
     }
 
@@ -777,6 +963,60 @@ async def get_states():
         "data": states
     }
 
+@app.get("/states/{state_id}/cities")
+async def get_cities_by_state(state_id: int):
+    """Get all cities for a specific state"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, name, is_major 
+        FROM cities 
+        WHERE state_id = ? 
+        ORDER BY is_major DESC, name ASC
+    ''', (state_id,))
+    cities = cursor.fetchall()
+    conn.close()
+    
+    cities_list = []
+    for city in cities:
+        cities_list.append({
+            "id": city["id"],
+            "name": city["name"],
+            "is_major": bool(city["is_major"])
+        })
+    
+    return {
+        "success": True,
+        "message": "Cities fetched successfully",
+        "data": cities_list
+    }
+@app.get("/states/{state_id}/cities")
+async def get_cities_by_state(state_id: int):
+    """Get all cities for a specific state"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, name, is_major 
+        FROM cities 
+        WHERE state_id = ? 
+        ORDER BY is_major DESC, name ASC
+    ''', (state_id,))
+    cities = cursor.fetchall()
+    conn.close()
+    
+    cities_list = []
+    for city in cities:
+        cities_list.append({
+            "id": city["id"],
+            "name": city["name"],
+            "is_major": bool(city["is_major"])
+        })
+    
+    return {
+        "success": True,
+        "message": "Cities fetched successfully",
+        "data": cities_list
+    }
 @app.get("/roles")
 async def get_roles():
     """Get all available user roles from database"""
@@ -803,9 +1043,11 @@ async def get_roles():
         if role["requires_admin_key"]:
             requirements.append("admin_secret_key")
         if role["requires_state"]:
-            requirements.append("state_id")
+            requirements.extend(["state_id", "city_id"])
         if role["requires_document"]:
             requirements.append("document")
+        if role["id"] != "admin":
+            requirements.append("mobile")
             
         age_requirement = None
         if role["min_age"] and role["max_age"]:
@@ -831,24 +1073,26 @@ async def get_roles():
         "message": "Roles fetched successfully",
         "data": roles_list
     }
-
-# Enhanced registration endpoint with role selection (including a
-# 
-# 
 @app.post("/register")
 async def register_user_with_role(
     username: str = Form(...),
     email: str = Form(...),
     password: str = Form(...),
+    mobile_number: str = Form(...),
     role: str = Form(...),  # Role selection (teacher, student only)
     state_id: int = Form(...),  # Required for teacher/student
+    city_id: int = Form(...),   # Required for teacher/student
     document: UploadFile = File(...)  # Required for teacher/student
 ):
-    """Register a new user with role selection and document verification"""
+    """Register a new user with role selection, mobile number, city and document verification"""
     try:
         # Validate role (admin removed since it has separate endpoint)
         if role not in ["teacher", "student"]:
             raise HTTPException(status_code=400, detail="Role must be 'teacher' or 'student'")
+        
+        # Validate mobile number format (Indian mobile number)
+        if not re.match(r'^[6-9]\d{9}$', mobile_number):
+            raise HTTPException(status_code=400, detail="Invalid mobile number format. Must be 10 digits starting with 6-9")
         
         # Get role data from database
         conn = get_db_connection()
@@ -868,6 +1112,19 @@ async def register_user_with_role(
         if role_data["requires_state"] and not state_id:
             conn.close()
             raise HTTPException(status_code=400, detail=f"State selection is required for {role_data['name']} registration")
+        
+        # Validate state and city combination
+        cursor.execute("SELECT name FROM states WHERE id = ?", (state_id,))
+        state = cursor.fetchone()
+        if not state:
+            conn.close()
+            raise HTTPException(status_code=400, detail="Invalid state selected")
+        
+        cursor.execute("SELECT name, district FROM cities WHERE id = ? AND state_id = ?", (city_id, state_id))
+        city = cursor.fetchone()
+        if not city:
+            conn.close()
+            raise HTTPException(status_code=400, detail="Invalid city selected for the chosen state")
         
         if not document.content_type.startswith('image/'):
             conn.close()
@@ -899,16 +1156,10 @@ async def register_user_with_role(
         user_id = generate_user_id(role)
         
         try:
-            cursor.execute("SELECT name FROM states WHERE id = ?", (state_id,))
-            state = cursor.fetchone()
-            if not state:
-                conn.close()
-                raise HTTPException(status_code=400, detail="Invalid state selected")
-            
             cursor.execute('''
-                INSERT INTO users (id, username, email, password, role, state_id, age, birthdate)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, username, email, hashed_password.decode('utf-8'), role, state_id, age, birthdate_str))
+                INSERT INTO users (id, username, email, mobile_number, password, role, state_id, city_id, age, birthdate)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (user_id, username, email, mobile_number, hashed_password.decode('utf-8'), role, state_id, city_id, age, birthdate_str))
             
             doc_id = str(uuid.uuid4())
             cursor.execute('''
@@ -924,16 +1175,31 @@ async def register_user_with_role(
                 "data": {
                     "user_id": user_id,
                     "username": username,
+                    "email": email,
+                    "mobile_number": mobile_number,
                     "role": role,
                     "age": age,
                     "birthdate": birthdate_str,
-                    "state": state["name"],
+                    "location": {
+                        "state": state["name"],
+                        "city": city["name"],
+                        "district": city["district"]
+                    },
                     "verification_status": "verified"
                 }
             }
             
-        except sqlite3.IntegrityError:
-            raise HTTPException(status_code=400, detail="Username or email already exists")
+        except sqlite3.IntegrityError as e:
+            conn.close()
+            error_msg = str(e)
+            if "username" in error_msg:
+                raise HTTPException(status_code=400, detail="Username already exists")
+            elif "email" in error_msg:
+                raise HTTPException(status_code=400, detail="Email already exists")
+            elif "mobile_number" in error_msg:
+                raise HTTPException(status_code=400, detail="Mobile number already exists")
+            else:
+                raise HTTPException(status_code=400, detail="Registration failed - duplicate data found")
         finally:
             conn.close()
             
@@ -956,10 +1222,9 @@ async def register_admin(admin_data: AdminCreate):
         
         try:
             cursor.execute('''
-                INSERT INTO users (id, username, email, password, role, state_id, age, birthdate)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (admin_id, admin_data.username, admin_data.email, hashed_password.decode('utf-8'), "admin", 1, None, None))
-            
+    INSERT INTO users (id, username, email, mobile_number, password, role, state_id, age, birthdate)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+''', (admin_id, admin_data.username, admin_data.email, "0000000000", hashed_password.decode('utf-8'), "admin", 1, None, None))
             conn.commit()
             
             return {
@@ -983,39 +1248,44 @@ async def register_admin(admin_data: AdminCreate):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Admin registration failed: {str(e)}")
 
-# Enhanced login endpoint with role and state selection (including admin)
+# Enhanced login endpoint with role, state, and city selection
 @app.post("/login")
 async def login_user_with_role(user_data: UserLoginWithRole):
-    """User login endpoint with role and state selection"""
+    """User login endpoint with role, state and city selection"""
     
     # Validate role
     if user_data.role not in ["admin", "teacher", "student"]:
         raise HTTPException(status_code=400, detail="Invalid role selected")
     
-    # State validation for non-admin users
-    if user_data.role != "admin" and not user_data.state_id:
-        raise HTTPException(status_code=400, detail="State selection is required for teachers and students")
+    # State and city validation for non-admin users
+    if user_data.role != "admin":
+        if not user_data.state_id:
+            raise HTTPException(status_code=400, detail="State selection is required for teachers and students")
+        if not user_data.city_id:
+            raise HTTPException(status_code=400, detail="City selection is required for teachers and students")
     
     conn = get_db_connection()
     cursor = conn.cursor()
     
     # Build query based on role
     if user_data.role == "admin":
-        # Admin login - no state requirement
+        # Admin login - no state/city requirement
         cursor.execute('''
-            SELECT u.*, s.name as state_name 
+            SELECT u.*, s.name as state_name, c.name as city_name, c.district 
             FROM users u 
             LEFT JOIN states s ON u.state_id = s.id 
+            LEFT JOIN cities c ON u.city_id = c.id
             WHERE u.username = ? AND u.role = ?
         ''', (user_data.username, user_data.role))
     else:
-        # For teachers and students, also check state
+        # For teachers and students, also check state and city
         cursor.execute('''
-            SELECT u.*, s.name as state_name 
+            SELECT u.*, s.name as state_name, c.name as city_name, c.district 
             FROM users u 
             LEFT JOIN states s ON u.state_id = s.id 
-            WHERE u.username = ? AND u.role = ? AND u.state_id = ?
-        ''', (user_data.username, user_data.role, user_data.state_id))
+            LEFT JOIN cities c ON u.city_id = c.id
+            WHERE u.username = ? AND u.role = ? AND u.state_id = ? AND u.city_id = ?
+        ''', (user_data.username, user_data.role, user_data.state_id, user_data.city_id))
     
     user = cursor.fetchone()
     conn.close()
@@ -1024,7 +1294,7 @@ async def login_user_with_role(user_data: UserLoginWithRole):
         if user_data.role == "admin":
             raise HTTPException(status_code=401, detail="Invalid admin credentials")
         else:
-            raise HTTPException(status_code=401, detail="Invalid credentials or role/state combination")
+            raise HTTPException(status_code=401, detail="Invalid credentials or role/state/city combination")
     
     if not bcrypt.checkpw(user_data.password.encode('utf-8'), user["password"].encode('utf-8')):
         raise HTTPException(status_code=401, detail="Invalid username or password")
@@ -1039,10 +1309,16 @@ async def login_user_with_role(user_data: UserLoginWithRole):
         "age": user["age"]
     }
     
-    # Add state info for non-admin users
+    # Add location info for non-admin users
     if user["role"] != "admin":
-        user_response["state"] = user["state_name"]
-        user_response["state_id"] = user["state_id"]
+        user_response["mobile_number"] = user["mobile_number"]
+        user_response["location"] = {
+            "state": user["state_name"],
+            "city": user["city_name"],
+            "district": user["district"],
+            "state_id": user["state_id"],
+            "city_id": user["city_id"]
+        }
     
     return {
         "success": True,
@@ -2044,35 +2320,47 @@ async def admin_dashboard(current_user: dict = Depends(verify_token)):
         }
     }
 
+
 @app.get("/admin/users")
 async def admin_get_users(
     role: Optional[str] = None,
+    state_id: Optional[int] = None,
+    city_id: Optional[int] = None,
     current_user: dict = Depends(verify_token)
 ):
-    """Admin endpoint to get all users with optional role filter"""
+    """Enhanced admin endpoint to get all users with filters for role, state, and city"""
     if current_user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Access denied. Admin only.")
     
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    if role and role in ["teacher", "student"]:
-        cursor.execute('''
-            SELECT u.id, u.username, u.email, u.role, u.age, u.birthdate, u.created_at, s.name as state_name
-            FROM users u 
-            LEFT JOIN states s ON u.state_id = s.id 
-            WHERE u.role = ?
-            ORDER BY u.created_at DESC
-        ''', (role,))
-    else:
-        cursor.execute('''
-            SELECT u.id, u.username, u.email, u.role, u.age, u.birthdate, u.created_at, s.name as state_name
-            FROM users u 
-            LEFT JOIN states s ON u.state_id = s.id 
-            WHERE u.role != 'admin'
-            ORDER BY u.created_at DESC
-        ''')
+    # Build query with filters
+    query = '''
+        SELECT u.id, u.username, u.email, u.mobile_number, u.role, u.age, u.birthdate, u.created_at, 
+               s.name as state_name, c.name as city_name, c.district
+        FROM users u 
+        LEFT JOIN states s ON u.state_id = s.id 
+        LEFT JOIN cities c ON u.city_id = c.id
+        WHERE u.role != 'admin'
+    '''
+    params = []
     
+    if role and role in ["teacher", "student"]:
+        query += ' AND u.role = ?'
+        params.append(role)
+    
+    if state_id:
+        query += ' AND u.state_id = ?'
+        params.append(state_id)
+    
+    if city_id:
+        query += ' AND u.city_id = ?'
+        params.append(city_id)
+    
+    query += ' ORDER BY u.created_at DESC'
+    
+    cursor.execute(query, params)
     users = cursor.fetchall()
     conn.close()
     
@@ -2082,19 +2370,40 @@ async def admin_get_users(
             "id": user["id"],
             "username": user["username"],
             "email": user["email"],
+            "mobile_number": user["mobile_number"],
             "role": user["role"],
-            "state": user["state_name"],
+            "location": {
+                "state": user["state_name"],
+                "city": user["city_name"],
+                "district": user["district"]
+            },
             "age": user["age"],
             "birthdate": user["birthdate"],
             "created_at": user["created_at"]
         })
     
+    # Build filter description for response
+    filter_desc = []
+    if role:
+        filter_desc.append(f"role: {role}")
+    if state_id:
+        filter_desc.append(f"state_id: {state_id}")
+    if city_id:
+        filter_desc.append(f"city_id: {city_id}")
+    
+    filter_text = " with filters (" + ", ".join(filter_desc) + ")" if filter_desc else ""
+    
     return {
         "success": True,
-        "message": f"{'All users' if not role else role.title() + 's'} fetched successfully",
+        "message": f"Users fetched successfully{filter_text}",
         "data": {
             "users": users_list,
-            "total_count": len(users_list)
+            "total_count": len(users_list),
+            "filters_applied": {
+                "role": role,
+                "state_id": state_id,
+                "city_id": city_id
+            }
         }
     }
 
