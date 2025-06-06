@@ -53,7 +53,7 @@ app.add_middleware(
 
 # Admin secret key for registration
 ADMIN_SECRET_KEY = "ADMIN_REGISTRATION_SECRET_2024"
-
+ADMIN_KEY_USAGE_LIMIT = 3
 # Test configuration
 TEST_CONFIG = {
     "duration_minutes": 60,
@@ -1211,30 +1211,48 @@ async def register_user_with_role(
 async def register_admin(admin_data: AdminCreate):
     """Register a new admin user (deprecated - use /register with admin role)"""
     try:
+        # Validate admin secret key
         if admin_data.admin_secret_key != ADMIN_SECRET_KEY:
             raise HTTPException(status_code=403, detail="Invalid admin secret key")
-        
-        hashed_password = bcrypt.hashpw(admin_data.password.encode('utf-8'), bcrypt.gensalt())
-        admin_id = generate_user_id("admin")
         
         conn = get_db_connection()
         cursor = conn.cursor()
         
         try:
+            # Count existing admin users to check usage limit
+            cursor.execute('SELECT COUNT(*) FROM users WHERE role = ?', ('admin',))
+            admin_count = cursor.fetchone()[0]
+            
+            # Check if limit exceeded
+            if admin_count >= ADMIN_KEY_USAGE_LIMIT:
+                raise HTTPException(
+                    status_code=403, 
+                    detail=f"Admin secret key has exceeded usage limit of {ADMIN_KEY_USAGE_LIMIT} registrations"
+                )
+            
+            # Create new admin user
+            hashed_password = bcrypt.hashpw(admin_data.password.encode('utf-8'), bcrypt.gensalt())
+            admin_id = generate_user_id("admin")
+            
             cursor.execute('''
-    INSERT INTO users (id, username, email, mobile_number, password, role, state_id, age, birthdate)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-''', (admin_id, admin_data.username, admin_data.email, "0000000000", hashed_password.decode('utf-8'), "admin", 1, None, None))
+                INSERT INTO users (id, username, email, mobile_number, password, role, state_id, age, birthdate)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (admin_id, admin_data.username, admin_data.email, "0000000000", hashed_password.decode('utf-8'), "admin", 1, None, None))
+            
             conn.commit()
+            
+            # Calculate remaining uses
+            remaining_uses = ADMIN_KEY_USAGE_LIMIT - (admin_count + 1)
             
             return {
                 "success": True,
-                "message": "Admin registered successfully",
+                "message": f"Admin registered successfully. Admin key can be used {remaining_uses} more time(s)." if remaining_uses > 0 else "Admin registered successfully. Admin key usage limit reached.",
                 "data": {
                     "admin_id": admin_id,
                     "username": admin_data.username,
                     "email": admin_data.email,
-                    "role": "admin"
+                    "role": "admin",
+                    "remaining_admin_key_uses": remaining_uses
                 }
             }
             
