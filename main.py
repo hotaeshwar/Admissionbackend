@@ -53,7 +53,7 @@ app.add_middleware(
 
 # Admin secret key for registration
 ADMIN_SECRET_KEY = "ADMIN_REGISTRATION_SECRET_2024"
-ADMIN_KEY_USAGE_LIMIT = 3
+ADMIN_KEY_USAGE_LIMIT = 10
 # Test configuration
 TEST_CONFIG = {
     "duration_minutes": 60,
