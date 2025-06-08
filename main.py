@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
@@ -53,12 +52,14 @@ app.add_middleware(
 
 # Admin secret key for registration
 ADMIN_SECRET_KEY = "ADMIN_REGISTRATION_SECRET_2024"
+ADMIN_KEY_USAGE_LIMIT = 17
 
 # Test configuration
 TEST_CONFIG = {
     "duration_minutes": 60,
     "total_questions": 30,
     "passing_score": 60,
+    "max_attempts": 5,  # ADD THIS LINE
     "questions_per_subject": {
         "Mathematics": 6,
         "Science": 6,
@@ -80,19 +81,19 @@ class UserCreate(BaseModel):
     username: str
     email: str
     password: str
-    mobile_number: str
-    state_id: int
-    city_id: int
+    mobile_number: Optional[str] = None  # Made optional for admin
+    state_id: Optional[int] = None
+    city_id: Optional[int] = None
 
 class UserCreateWithRole(BaseModel):
     username: str
     email: str
     password: str
-    mobile_number: str
+    mobile_number: Optional[str] = None  # Optional for admin
     role: str  # 'teacher', 'student', or 'admin'
-    state_id: Optional[int] = None  # Required for teachers/students, optional for admin
-    city_id: Optional[int] = None   # Required for teachers/students, optional for admin
-    admin_secret_key: Optional[str] = None  # Required only for admin registration
+    state_id: Optional[int] = None
+    city_id: Optional[int] = None
+    admin_secret_key: Optional[str] = None
 
 class AdminCreate(BaseModel):
     username: str
@@ -107,12 +108,12 @@ class UserLogin(BaseModel):
 class UserLoginWithRole(BaseModel):
     username: str
     password: str
-    role: str  # 'teacher', 'student', or 'admin'
-    state_id: Optional[int] = None  # Required for teachers and students, not for admin
-    city_id: Optional[int] = None   # Required for teachers and students, not for admin
+    role: str
+    state_id: Optional[int] = None
+    city_id: Optional[int] = None
 
 class PasswordResetRequest(BaseModel):
-    username: str
+    identifier: str  # Can be either username or email
 
 class ResetTokenResponse(BaseModel):
     reset_token: str
@@ -193,7 +194,7 @@ def generate_user_id(role: str) -> str:
     else:
         return f"ADMIN{unique_id}"
 
-# Enhanced Database setup with mobile, cities and locations
+# Enhanced Database setup - MODIFIED FOR ADMIN
 def init_db():
     conn = sqlite3.connect('verification_system.db')
     cursor = conn.cursor()
@@ -207,6 +208,7 @@ def init_db():
             requires_document BOOLEAN DEFAULT TRUE,
             requires_state BOOLEAN DEFAULT TRUE,
             requires_admin_key BOOLEAN DEFAULT FALSE,
+            requires_mobile BOOLEAN DEFAULT TRUE,
             min_age INTEGER,
             max_age INTEGER
         )
@@ -221,7 +223,7 @@ def init_db():
         )
     ''')
     
-    # Enhanced Cities table with more comprehensive data
+    # Enhanced Cities table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS cities (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -239,13 +241,13 @@ def init_db():
         )
     ''')
     
-    # Enhanced Users table with mobile number and city
+    # MODIFIED Users table - mobile_number is nullable
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             email TEXT UNIQUE NOT NULL,
-            mobile_number TEXT UNIQUE NOT NULL,
+            mobile_number TEXT UNIQUE,  -- REMOVED NOT NULL constraint
             password TEXT NOT NULL,
             role TEXT NOT NULL CHECK(role IN ('admin', 'teacher', 'student')),
             state_id INTEGER,
@@ -295,26 +297,26 @@ def init_db():
     
     # Test attempts table
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS test_attempts (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            test_session_id TEXT NOT NULL,
-            start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            end_time TIMESTAMP,
-            total_questions INTEGER,
-            correct_answers INTEGER,
-            wrong_answers INTEGER,
-            unanswered INTEGER,
-            score_percentage REAL,
-            result_status TEXT DEFAULT 'pending',
-            admin_approval TEXT DEFAULT 'pending',
-            admin_comments TEXT,
-            approved_by TEXT,
-            approved_at TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (id),
-            UNIQUE(user_id)
-        )
-    ''')
+    CREATE TABLE IF NOT EXISTS test_attempts (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        test_session_id TEXT NOT NULL,
+        start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        end_time TIMESTAMP,
+        total_questions INTEGER,
+        correct_answers INTEGER,
+        wrong_answers INTEGER,
+        unanswered INTEGER,
+        score_percentage REAL,
+        result_status TEXT DEFAULT 'pending',
+        admin_approval TEXT DEFAULT 'pending',
+        admin_comments TEXT,
+        approved_by TEXT,
+        approved_at TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+        -- REMOVED: UNIQUE(user_id)
+    )
+''')
     
     # Test responses table
     cursor.execute('''
@@ -375,20 +377,20 @@ def init_db():
         )
     ''')
     
-    # Insert roles data
+    # MODIFIED roles data - admin doesn't require mobile
     roles_data = [
-        ("admin", "Administrator", "System administrator with full access", False, False, True, None, None),
-        ("teacher", "Teacher", "Teacher with meeting and student management access", True, True, False, 20, None),
-        ("student", "Student", "Student with test taking and meeting access", True, True, False, None, 19)
+        ("admin", "Administrator", "System administrator with full access", False, False, True, False, None, None),
+        ("teacher", "Teacher", "Teacher with meeting and student management access", True, True, False, True, 20, None),
+        ("student", "Student", "Student with test taking and meeting access", True, True, False, True, None, 19)
     ]
     
     cursor.executemany('''
         INSERT OR IGNORE INTO roles 
-        (id, name, description, requires_document, requires_state, requires_admin_key, min_age, max_age)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (id, name, description, requires_document, requires_state, requires_admin_key, requires_mobile, min_age, max_age)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', roles_data)
     
-    # Insert comprehensive states data with codes
+    # Insert states data
     states_data = [
         (1, "Delhi", "DL"),
         (2, "Haryana", "HR"),
@@ -402,7 +404,7 @@ def init_db():
     
     cursor.executemany('INSERT OR IGNORE INTO states (id, name, code) VALUES (?, ?, ?)', states_data)
     
-    # Insert comprehensive cities data for all states
+    # Insert cities data
     cities_data = get_comprehensive_cities_data()
     for city in cities_data:
         cursor.execute('''
@@ -563,6 +565,7 @@ def get_comprehensive_cities_data():
         ("Lachhmangarh", 8, "Sikar", False, False, 41547, 27.8229, 75.1671, "332")
     ]
 
+
 def get_sample_questions():
     """Sample aptitude test questions for grades 10-12"""
     return [
@@ -614,7 +617,6 @@ def get_sample_questions():
         ("Psychology", "Decision", "When making important decisions, you rely most on:", "Logic and facts", "Emotions and feelings", "Others' opinions", "Past experiences", "A", 2, "10-12"),
         ("Psychology", "Stress", "When you feel stressed, you usually:", "Take a break", "Work harder", "Talk to someone", "Ignore the stress", "A", 2, "10-12"),
     ]
-
 # Initialize database
 init_db()
 
@@ -700,6 +702,7 @@ def create_zoom_meeting(teacher_id: str, topic: str, start_time: datetime, durat
     
     return False, f"Error creating meeting: {response.text}", None
 
+# OCR and other utility functions (keeping existing implementations)
 def process_ocr(image_bytes: bytes) -> str:
     """Process OCR using web API"""
     try:
@@ -906,45 +909,30 @@ def predict_result(score_percentage: float, subject_scores: Dict) -> str:
     else:
         return "likely_fail"
 
+
+
 # API Routes
 
 @app.get("/")
 async def root():
     return {
         "message": "ID Document Age Verification, Aptitude Test & Zoom Meeting System API",
-        "version": "4.2.0",
+        "version": "4.3.0",
         "endpoints": {
             "states": "/states - Get all available states for dropdown",
             "cities": "/states/{state_id}/cities - Get cities for selected state",
             "roles": "/roles - Get all available user roles for dropdown", 
             "register": "/register (with role selection: teacher, student, admin)",
-            "admin_register": "/admin/register (deprecated - use /register with admin role)",
+            "admin_register": "/admin/register",
             "login": "/login (with role, state, and city selection)",
-            "password_reset_request": "/password-reset-request",
+            "password_reset_request": "/password-reset-request (accepts username or email)",
             "reset_password": "/reset-password",
             "validate_reset_token": "/password-reset/validate-token/{token}",
-            "cleanup_expired_tokens": "/password-reset/cleanup-expired",
-            "upload_document": "/upload-document",
-            "student_dashboard": "/student/dashboard",
-            "student_test": "/student/test",
-            "teacher_dashboard": "/teacher/dashboard",
-            "teacher_meetings": "/teacher/meetings",
-            "admin_dashboard": "/admin/dashboard",
-            "admin_users": "/admin/users",
-            "admin_questions": "/admin/questions",
-            "admin_test_results": "/admin/test-results",
-            "admin_meetings": "/admin/meetings",
             "user_profile": "/user/profile"
         },
-        "registration_requirements": {
-            "admin": ["username", "email", "password", "admin_secret_key"],
-            "teacher": ["username", "email", "mobile", "password", "state_id", "city_id", "location (optional)", "document"],
-            "student": ["username", "email", "mobile", "password", "state_id", "city_id", "location (optional)", "document"]
-        },
-        "login_requirements": {
-            "admin": ["username", "password", "role"],
-            "teacher": ["username", "password", "role", "state_id", "city_id (optional)"],
-            "student": ["username", "password", "role", "state_id", "city_id (optional)"]
+        "changes": {
+            "admin_mobile": "Mobile number not required for admin users",
+            "password_reset": "Now accepts both username and email for reset requests"
         }
     }
 
@@ -990,33 +978,7 @@ async def get_cities_by_state(state_id: int):
         "message": "Cities fetched successfully",
         "data": cities_list
     }
-@app.get("/states/{state_id}/cities")
-async def get_cities_by_state(state_id: int):
-    """Get all cities for a specific state"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT id, name, is_major 
-        FROM cities 
-        WHERE state_id = ? 
-        ORDER BY is_major DESC, name ASC
-    ''', (state_id,))
-    cities = cursor.fetchall()
-    conn.close()
-    
-    cities_list = []
-    for city in cities:
-        cities_list.append({
-            "id": city["id"],
-            "name": city["name"],
-            "is_major": bool(city["is_major"])
-        })
-    
-    return {
-        "success": True,
-        "message": "Cities fetched successfully",
-        "data": cities_list
-    }
+
 @app.get("/roles")
 async def get_roles():
     """Get all available user roles from database"""
@@ -1024,7 +986,7 @@ async def get_roles():
     cursor = conn.cursor()
     cursor.execute('''
         SELECT id, name, description, requires_document, requires_state, 
-               requires_admin_key, min_age, max_age 
+               requires_admin_key, requires_mobile, min_age, max_age 
         FROM roles 
         ORDER BY 
             CASE id 
@@ -1046,7 +1008,7 @@ async def get_roles():
             requirements.extend(["state_id", "city_id"])
         if role["requires_document"]:
             requirements.append("document")
-        if role["id"] != "admin":
+        if role["requires_mobile"]:  # Only add mobile if required
             requirements.append("mobile")
             
         age_requirement = None
@@ -1065,6 +1027,7 @@ async def get_roles():
             "requires_document": bool(role["requires_document"]),
             "requires_state": bool(role["requires_state"]),
             "requires_admin_key": bool(role["requires_admin_key"]),
+            "requires_mobile": bool(role["requires_mobile"]),
             "age_requirement": age_requirement
         })
     
@@ -1073,30 +1036,30 @@ async def get_roles():
         "message": "Roles fetched successfully",
         "data": roles_list
     }
+
+# MODIFIED REGISTRATION ENDPOINTS
 @app.post("/register")
 async def register_user_with_role(
     username: str = Form(...),
     email: str = Form(...),
     password: str = Form(...),
-    mobile_number: str = Form(...),
-    role: str = Form(...),  # Role selection (teacher, student only)
-    state_id: int = Form(...),  # Required for teacher/student
-    city_id: int = Form(...),   # Required for teacher/student
-    document: UploadFile = File(...)  # Required for teacher/student
+    role: str = Form(...),
+    mobile_number: Optional[str] = Form(None),  # Optional for admin
+    state_id: Optional[int] = Form(None),
+    city_id: Optional[int] = Form(None),
+    admin_secret_key: Optional[str] = Form(None),
+    document: Optional[UploadFile] = File(None)
 ):
-    """Register a new user with role selection, mobile number, city and document verification"""
+    """Register a new user with role selection"""
     try:
-        # Validate role (admin removed since it has separate endpoint)
-        if role not in ["teacher", "student"]:
-            raise HTTPException(status_code=400, detail="Role must be 'teacher' or 'student'")
+        # Validate role
+        if role not in ["admin", "teacher", "student"]:
+            raise HTTPException(status_code=400, detail="Role must be 'admin', 'teacher', or 'student'")
         
-        # Validate mobile number format (Indian mobile number)
-        if not re.match(r'^[6-9]\d{9}$', mobile_number):
-            raise HTTPException(status_code=400, detail="Invalid mobile number format. Must be 10 digits starting with 6-9")
-        
-        # Get role data from database
         conn = get_db_connection()
         cursor = conn.cursor()
+        
+        # Get role data from database
         cursor.execute("SELECT * FROM roles WHERE id = ?", (role,))
         role_data = cursor.fetchone()
         
@@ -1104,63 +1067,117 @@ async def register_user_with_role(
             conn.close()
             raise HTTPException(status_code=400, detail="Invalid role selected")
         
-        # Check role requirements
-        if role_data["requires_document"] and not document:
-            conn.close()
-            raise HTTPException(status_code=400, detail=f"Document is required for {role_data['name']} registration")
+        # Role-specific validations
+        if role == "admin":
+            # Admin validation
+            if not admin_secret_key or admin_secret_key != ADMIN_SECRET_KEY:
+                conn.close()
+                raise HTTPException(status_code=403, detail="Invalid admin secret key")
+            
+            # Check admin registration limit
+            cursor.execute('SELECT COUNT(*) FROM users WHERE role = ?', ('admin',))
+            admin_count = cursor.fetchone()[0]
+            
+            if admin_count >= ADMIN_KEY_USAGE_LIMIT:
+                conn.close()
+                raise HTTPException(
+                    status_code=403, 
+                    detail=f"Admin secret key has exceeded usage limit of {ADMIN_KEY_USAGE_LIMIT} registrations"
+                )
+            
+            # For admin, mobile, state, city, and document are not required
+            hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+            admin_id = generate_user_id("admin")
+            
+            cursor.execute('''
+                INSERT INTO users (id, username, email, password, role)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (admin_id, username, email, hashed_password.decode('utf-8'), "admin"))
+            
+            conn.commit()
+            remaining_uses = ADMIN_KEY_USAGE_LIMIT - (admin_count + 1)
+            
+            return {
+                "success": True,
+                "message": f"Admin registered successfully. Admin key can be used {remaining_uses} more time(s)." if remaining_uses > 0 else "Admin registered successfully. Admin key usage limit reached.",
+                "data": {
+                    "user_id": admin_id,
+                    "username": username,
+                    "email": email,
+                    "role": "admin",
+                    "remaining_admin_key_uses": remaining_uses
+                }
+            }
         
-        if role_data["requires_state"] and not state_id:
-            conn.close()
-            raise HTTPException(status_code=400, detail=f"State selection is required for {role_data['name']} registration")
-        
-        # Validate state and city combination
-        cursor.execute("SELECT name FROM states WHERE id = ?", (state_id,))
-        state = cursor.fetchone()
-        if not state:
-            conn.close()
-            raise HTTPException(status_code=400, detail="Invalid state selected")
-        
-        cursor.execute("SELECT name, district FROM cities WHERE id = ? AND state_id = ?", (city_id, state_id))
-        city = cursor.fetchone()
-        if not city:
-            conn.close()
-            raise HTTPException(status_code=400, detail="Invalid city selected for the chosen state")
-        
-        if not document.content_type.startswith('image/'):
-            conn.close()
-            raise HTTPException(status_code=400, detail="Only image files are allowed")
-        
-        image_bytes = await document.read()
-        extracted_text = process_ocr(image_bytes)
-        
-        if not extracted_text:
-            conn.close()
-            raise HTTPException(status_code=400, detail="Could not extract text from document. Please upload a clearer image.")
-        
-        birthdate_str, age = extract_birthdate_and_age(extracted_text)
-        
-        if not age:
-            conn.close()
-            raise HTTPException(status_code=400, detail="Could not extract age/birthdate from document")
-        
-        # Age validation based on role requirements from database
-        if role_data["min_age"] and age < role_data["min_age"]:
-            conn.close()
-            raise HTTPException(status_code=400, detail=f"{role_data['name']}s must be at least {role_data['min_age']} years old")
-        
-        if role_data["max_age"] and age > role_data["max_age"]:
-            conn.close() 
-            raise HTTPException(status_code=400, detail=f"{role_data['name']}s must be {role_data['max_age']} years old or younger")
-        
-        hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
-        user_id = generate_user_id(role)
-        
-        try:
+        else:
+            # Teacher/Student validation
+            if not mobile_number:
+                conn.close()
+                raise HTTPException(status_code=400, detail=f"Mobile number is required for {role} registration")
+            
+            # Validate mobile number format
+            if not re.match(r'^[6-9]\d{9}$', mobile_number):
+                conn.close()
+                raise HTTPException(status_code=400, detail="Invalid mobile number format. Must be 10 digits starting with 6-9")
+            
+            if not state_id or not city_id:
+                conn.close()
+                raise HTTPException(status_code=400, detail=f"State and city selection is required for {role} registration")
+            
+            if not document:
+                conn.close()
+                raise HTTPException(status_code=400, detail=f"Document is required for {role} registration")
+            
+            # Validate state and city
+            cursor.execute("SELECT name FROM states WHERE id = ?", (state_id,))
+            state = cursor.fetchone()
+            if not state:
+                conn.close()
+                raise HTTPException(status_code=400, detail="Invalid state selected")
+            
+            cursor.execute("SELECT name, district FROM cities WHERE id = ? AND state_id = ?", (city_id, state_id))
+            city = cursor.fetchone()
+            if not city:
+                conn.close()
+                raise HTTPException(status_code=400, detail="Invalid city selected for the chosen state")
+            
+            # Process document
+            if not document.content_type.startswith('image/'):
+                conn.close()
+                raise HTTPException(status_code=400, detail="Only image files are allowed")
+            
+            image_bytes = await document.read()
+            extracted_text = process_ocr(image_bytes)
+            
+            if not extracted_text:
+                conn.close()
+                raise HTTPException(status_code=400, detail="Could not extract text from document. Please upload a clearer image.")
+            
+            birthdate_str, age = extract_birthdate_and_age(extracted_text)
+            
+            if not age:
+                conn.close()
+                raise HTTPException(status_code=400, detail="Could not extract age/birthdate from document")
+            
+            # Age validation based on role requirements
+            if role_data["min_age"] and age < role_data["min_age"]:
+                conn.close()
+                raise HTTPException(status_code=400, detail=f"{role_data['name']}s must be at least {role_data['min_age']} years old")
+            
+            if role_data["max_age"] and age > role_data["max_age"]:
+                conn.close() 
+                raise HTTPException(status_code=400, detail=f"{role_data['name']}s must be {role_data['max_age']} years old or younger")
+            
+            hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+            user_id = generate_user_id(role)
+            
+            # Insert user with mobile number
             cursor.execute('''
                 INSERT INTO users (id, username, email, mobile_number, password, role, state_id, city_id, age, birthdate)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (user_id, username, email, mobile_number, hashed_password.decode('utf-8'), role, state_id, city_id, age, birthdate_str))
             
+            # Insert document
             doc_id = str(uuid.uuid4())
             cursor.execute('''
                 INSERT INTO documents (id, user_id, filename, extracted_text, birthdate, age, verification_status)
@@ -1171,7 +1188,7 @@ async def register_user_with_role(
             
             return {
                 "success": True,
-                "message": "User registered successfully",
+                "message": f"{role.capitalize()} registered successfully",
                 "data": {
                     "user_id": user_id,
                     "username": username,
@@ -1189,66 +1206,90 @@ async def register_user_with_role(
                 }
             }
             
-        except sqlite3.IntegrityError as e:
+    except sqlite3.IntegrityError as e:
+        if 'conn' in locals():
             conn.close()
-            error_msg = str(e)
-            if "username" in error_msg:
-                raise HTTPException(status_code=400, detail="Username already exists")
-            elif "email" in error_msg:
-                raise HTTPException(status_code=400, detail="Email already exists")
-            elif "mobile_number" in error_msg:
-                raise HTTPException(status_code=400, detail="Mobile number already exists")
-            else:
-                raise HTTPException(status_code=400, detail="Registration failed - duplicate data found")
-        finally:
-            conn.close()
-            
+        error_msg = str(e)
+        if "username" in error_msg:
+            raise HTTPException(status_code=400, detail="Username already exists")
+        elif "email" in error_msg:
+            raise HTTPException(status_code=400, detail="Email already exists")
+        elif "mobile_number" in error_msg:
+            raise HTTPException(status_code=400, detail="Mobile number already exists")
+        else:
+            raise HTTPException(status_code=400, detail="Registration failed - duplicate data found")
     except HTTPException:
+        if 'conn' in locals():
+            conn.close()
         raise
     except Exception as e:
+        if 'conn' in locals():
+            conn.close()
         raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 @app.post("/admin/register")
 async def register_admin(admin_data: AdminCreate):
-    """Register a new admin user (deprecated - use /register with admin role)"""
+    """Register a new admin user (alternative endpoint)"""
     try:
+        # Validate admin secret key
         if admin_data.admin_secret_key != ADMIN_SECRET_KEY:
             raise HTTPException(status_code=403, detail="Invalid admin secret key")
-        
-        hashed_password = bcrypt.hashpw(admin_data.password.encode('utf-8'), bcrypt.gensalt())
-        admin_id = generate_user_id("admin")
         
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        try:
-            cursor.execute('''
-    INSERT INTO users (id, username, email, mobile_number, password, role, state_id, age, birthdate)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-''', (admin_id, admin_data.username, admin_data.email, "0000000000", hashed_password.decode('utf-8'), "admin", 1, None, None))
-            conn.commit()
-            
-            return {
-                "success": True,
-                "message": "Admin registered successfully",
-                "data": {
-                    "admin_id": admin_id,
-                    "username": admin_data.username,
-                    "email": admin_data.email,
-                    "role": "admin"
-                }
-            }
-            
-        except sqlite3.IntegrityError:
-            raise HTTPException(status_code=400, detail="Username or email already exists")
-        finally:
+        # Count existing admin users to check usage limit
+        cursor.execute('SELECT COUNT(*) FROM users WHERE role = ?', ('admin',))
+        admin_count = cursor.fetchone()[0]
+        
+        if admin_count >= ADMIN_KEY_USAGE_LIMIT:
             conn.close()
-            
+            raise HTTPException(
+                status_code=403, 
+                detail=f"Admin secret key has exceeded usage limit of {ADMIN_KEY_USAGE_LIMIT} registrations"
+            )
+        
+        # Create new admin user (NO mobile_number)
+        hashed_password = bcrypt.hashpw(admin_data.password.encode('utf-8'), bcrypt.gensalt())
+        admin_id = generate_user_id("admin")
+        
+        cursor.execute('''
+            INSERT INTO users (id, username, email, password, role)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (admin_id, admin_data.username, admin_data.email, hashed_password.decode('utf-8'), "admin"))
+        
+        conn.commit()
+        
+        # Calculate remaining uses
+        remaining_uses = ADMIN_KEY_USAGE_LIMIT - (admin_count + 1)
+        
+        return {
+            "success": True,
+            "message": f"Admin registered successfully. Admin key can be used {remaining_uses} more time(s)." if remaining_uses > 0 else "Admin registered successfully. Admin key usage limit reached.",
+            "data": {
+                "admin_id": admin_id,
+                "username": admin_data.username,
+                "email": admin_data.email,
+                "role": "admin",
+                "remaining_admin_key_uses": remaining_uses
+            }
+        }
+        
+    except sqlite3.IntegrityError as e:
+        conn.close()
+        error_msg = str(e)
+        if "username" in error_msg:
+            raise HTTPException(status_code=400, detail="Username already exists")
+        elif "email" in error_msg:
+            raise HTTPException(status_code=400, detail="Email already exists")
+        else:
+            raise HTTPException(status_code=400, detail="Registration failed - duplicate data found")
     except HTTPException:
         raise
     except Exception as e:
+        if 'conn' in locals():
+            conn.close()
         raise HTTPException(status_code=500, detail=f"Admin registration failed: {str(e)}")
 
-# Enhanced login endpoint with role, state, and city selection
 @app.post("/login")
 async def login_user_with_role(user_data: UserLoginWithRole):
     """User login endpoint with role, state and city selection"""
@@ -1309,7 +1350,7 @@ async def login_user_with_role(user_data: UserLoginWithRole):
         "age": user["age"]
     }
     
-    # Add location info for non-admin users
+    # Add mobile and location info for non-admin users
     if user["role"] != "admin":
         user_response["mobile_number"] = user["mobile_number"]
         user_response["location"] = {
@@ -1330,16 +1371,21 @@ async def login_user_with_role(user_data: UserLoginWithRole):
         }
     }
 
-# Password Reset Endpoints
+# MODIFIED PASSWORD RESET ENDPOINTS
 @app.post("/password-reset-request", response_model=ResetTokenResponse)
 async def request_password_reset(request: PasswordResetRequest):
-    """Request a password reset token for a user"""
+    """Request a password reset token using username or email"""
     conn = get_db_connection()
     cursor = conn.cursor()
     
     try:
-        # Find user by username (case-insensitive)
-        cursor.execute("SELECT id, username FROM users WHERE LOWER(username) = LOWER(?)", (request.username.strip(),))
+        identifier = request.identifier.strip()
+        
+        # Search by both username and email (case-insensitive)
+        cursor.execute('''
+            SELECT id, username, email FROM users 
+            WHERE LOWER(username) = LOWER(?) OR LOWER(email) = LOWER(?)
+        ''', (identifier, identifier))
         user_data = cursor.fetchone()
         
         if not user_data:
@@ -1347,12 +1393,12 @@ async def request_password_reset(request: PasswordResetRequest):
                 status_code=status.HTTP_404_NOT_FOUND,
                 content={
                     "success": False, 
-                    "message": "User not found. Please check your username and try again.",
+                    "message": "User not found. Please check your username or email and try again.",
                     "error_code": "USER_NOT_FOUND"
                 }
             )
         
-        user_id, username = user_data["id"], user_data["username"]
+        user_id, username, email = user_data["id"], user_data["username"], user_data["email"]
         
         # Generate unique reset token
         reset_token = generate_reset_token()
@@ -1365,10 +1411,10 @@ async def request_password_reset(request: PasswordResetRequest):
         )
         conn.commit()
         
-        # Return the token directly (no email sending in this implementation)
+        # Return the token with user info
         return {
             "reset_token": reset_token,
-            "message": "Use this token to reset your password. This token will expire in 1 hour."
+            "message": f"Password reset token generated for user '{username}' (email: {email}). This token will expire in 1 hour."
         }
         
     except Exception as e:
@@ -1392,7 +1438,10 @@ async def reset_password(reset_data: PasswordReset):
     
     try:
         # Find user with the token
-        cursor.execute("SELECT id, username, reset_token_expires FROM users WHERE reset_token = ?", (reset_data.token,))
+        cursor.execute('''
+            SELECT id, username, email, reset_token_expires 
+            FROM users WHERE reset_token = ?
+        ''', (reset_data.token,))
         user_data = cursor.fetchone()
         
         if not user_data:
@@ -1405,7 +1454,10 @@ async def reset_password(reset_data: PasswordReset):
                 }
             )
         
-        user_id, username, token_expires_str = user_data["id"], user_data["username"], user_data["reset_token_expires"]
+        user_id, username, email, token_expires_str = (
+            user_data["id"], user_data["username"], 
+            user_data["email"], user_data["reset_token_expires"]
+        )
         
         # Check if token is expired
         if not token_expires_str:
@@ -1463,9 +1515,10 @@ async def reset_password(reset_data: PasswordReset):
         
         return {
             "success": True,
-            "message": f"Password has been reset successfully for user '{username}'",
+            "message": f"Password has been reset successfully for user '{username}' (email: {email})",
             "data": {
                 "username": username,
+                "email": email,
                 "reset_time": datetime.utcnow().isoformat()
             }
         }
@@ -1491,7 +1544,10 @@ async def validate_reset_token(token: str):
     
     try:
         # Find user with the token
-        cursor.execute("SELECT username, reset_token_expires FROM users WHERE reset_token = ?", (token,))
+        cursor.execute('''
+            SELECT username, email, reset_token_expires 
+            FROM users WHERE reset_token = ?
+        ''', (token,))
         user_data = cursor.fetchone()
         
         if not user_data:
@@ -1501,7 +1557,9 @@ async def validate_reset_token(token: str):
                 "data": {"valid": False, "reason": "token_not_found"}
             }
         
-        username, token_expires_str = user_data["username"], user_data["reset_token_expires"]
+        username, email, token_expires_str = (
+            user_data["username"], user_data["email"], user_data["reset_token_expires"]
+        )
         
         if not token_expires_str:
             return {
@@ -1540,6 +1598,7 @@ async def validate_reset_token(token: str):
             "data": {
                 "valid": True,
                 "username": username,
+                "email": email,
                 "expires_at": token_expires.isoformat(),
                 "minutes_remaining": int(time_remaining.total_seconds() / 60)
             }
@@ -1741,136 +1800,172 @@ async def admin_delete_user(
         raise HTTPException(status_code=500, detail=f"Failed to delete user: {str(e)}")
     finally:
         conn.close()
-
 @app.get("/student/dashboard")
 async def student_dashboard(current_user: dict = Depends(verify_token)):
     """Student dashboard with test status, results, and meetings"""
     if current_user["role"] != "student":
         raise HTTPException(status_code=403, detail="Access denied. Students only.")
     
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    conn = None
+    cursor = None
     
-    # Get user details
-    cursor.execute('''
-        SELECT u.*, s.name as state_name 
-        FROM users u 
-        LEFT JOIN states s ON u.state_id = s.id 
-        WHERE u.id = ?
-    ''', (current_user["sub"],))
-    user = cursor.fetchone()
-    
-    # Check if test has been attempted
-    cursor.execute('''
-        SELECT id, start_time, end_time, total_questions, correct_answers, 
-               score_percentage, result_status, admin_approval, admin_comments, approved_at
-        FROM test_attempts 
-        WHERE user_id = ?
-    ''', (current_user["sub"],))
-    test_attempt = cursor.fetchone()
-    
-    # Get upcoming meetings for this student (both teacher and admin created)
-    cursor.execute('''
-        SELECT m.id, m.topic, m.start_time, m.duration, m.join_url, m.status,
-               u.username as host_name, u.role as host_role
-        FROM meetings m
-        JOIN meeting_participants mp ON m.id = mp.meeting_id
-        JOIN users u ON m.teacher_id = u.id
-        WHERE mp.student_id = ? AND m.start_time > datetime('now')
-        ORDER BY m.start_time ASC
-    ''', (current_user["sub"],))
-    upcoming_meetings = cursor.fetchall()
-    
-    # Get past meetings with recordings
-    cursor.execute('''
-        SELECT m.id, m.topic, m.start_time, m.duration, m.status,
-               u.username as host_name, u.role as host_role,
-               mr.recording_url, mr.file_type
-        FROM meetings m
-        JOIN meeting_participants mp ON m.id = mp.meeting_id
-        JOIN users u ON m.teacher_id = u.id
-        LEFT JOIN meeting_recordings mr ON m.id = mr.meeting_id
-        WHERE mp.student_id = ? AND m.start_time <= datetime('now')
-        ORDER BY m.start_time DESC
-    ''', (current_user["sub"],))
-    past_meetings = cursor.fetchall()
-    
-    conn.close()
-    
-    dashboard_data = {
-        "user": {
-            "id": user["id"],
-            "username": user["username"],
-            "email": user["email"],
-            "state": user["state_name"],
-            "age": user["age"]
-        },
-        "test_status": {
-            "can_take_test": test_attempt is None,
-            "test_completed": test_attempt is not None,
-            "test_config": {
-                "duration_minutes": TEST_CONFIG["duration_minutes"],
-                "total_questions": TEST_CONFIG["total_questions"],
-                "passing_score": TEST_CONFIG["passing_score"]
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Get user details
+        cursor.execute('''
+            SELECT u.*, s.name as state_name 
+            FROM users u 
+            LEFT JOIN states s ON u.state_id = s.id 
+            WHERE u.id = ?
+        ''', (current_user["sub"],))
+        user = cursor.fetchone()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Count existing attempts
+        cursor.execute('''
+            SELECT COUNT(*) as count FROM test_attempts WHERE user_id = ?
+        ''', (current_user["sub"],))
+        attempt_count = cursor.fetchone()["count"]
+        
+        # Check if test has been attempted - get latest attempt
+        cursor.execute('''
+            SELECT id, start_time, end_time, total_questions, correct_answers, 
+                   score_percentage, result_status, admin_approval, admin_comments, approved_at
+            FROM test_attempts 
+            WHERE user_id = ?
+            ORDER BY start_time DESC
+            LIMIT 1
+        ''', (current_user["sub"],))
+        latest_attempt = cursor.fetchone()
+        
+        # Get upcoming meetings for this student (both teacher and admin created)
+        cursor.execute('''
+            SELECT m.id, m.topic, m.start_time, m.duration, m.join_url, m.status,
+                   u.username as host_name, u.role as host_role
+            FROM meetings m
+            JOIN meeting_participants mp ON m.id = mp.meeting_id
+            JOIN users u ON m.teacher_id = u.id
+            WHERE mp.student_id = ? AND m.start_time > datetime('now')
+            ORDER BY m.start_time ASC
+        ''', (current_user["sub"],))
+        upcoming_meetings = cursor.fetchall()
+        
+        # Get past meetings with recordings
+        cursor.execute('''
+            SELECT m.id, m.topic, m.start_time, m.duration, m.status,
+                   u.username as host_name, u.role as host_role,
+                   mr.recording_url, mr.file_type
+            FROM meetings m
+            JOIN meeting_participants mp ON m.id = mp.meeting_id
+            JOIN users u ON m.teacher_id = u.id
+            LEFT JOIN meeting_recordings mr ON m.id = mr.meeting_id
+            WHERE mp.student_id = ? AND m.start_time <= datetime('now')
+            ORDER BY m.start_time DESC
+        ''', (current_user["sub"],))
+        past_meetings = cursor.fetchall()
+        
+        # Build dashboard data
+        dashboard_data = {
+            "user": {
+                "id": user["id"],
+                "username": user["username"],
+                "email": user["email"],
+                "state": user["state_name"],
+                "age": user["age"]
+            },
+            "test_status": {
+                "can_take_test": attempt_count < TEST_CONFIG["max_attempts"],
+                "test_completed": attempt_count > 0,
+                "total_attempts": attempt_count,
+                "max_attempts": TEST_CONFIG["max_attempts"],
+                "remaining_attempts": TEST_CONFIG["max_attempts"] - attempt_count,
+                "test_config": {
+                    "duration_minutes": TEST_CONFIG["duration_minutes"],
+                    "total_questions": TEST_CONFIG["total_questions"],
+                    "passing_score": TEST_CONFIG["passing_score"],
+                    "max_attempts": TEST_CONFIG["max_attempts"]
+                }
+            },
+            "meetings": {
+                "upcoming": [
+                    {
+                        "id": meeting["id"],
+                        "topic": meeting["topic"],
+                        "host_name": meeting["host_name"],
+                        "host_type": "Admin" if meeting["host_role"] == "admin" else "Teacher",
+                        "start_time": meeting["start_time"],
+                        "duration": meeting["duration"],
+                        "join_url": meeting["join_url"],
+                        "status": meeting["status"],
+                        "time_until_meeting": "Calculate client-side",
+                        "can_join": True  # Students can always see join link
+                    }
+                    for meeting in upcoming_meetings
+                ],
+                "past_with_recordings": [
+                    {
+                        "id": meeting["id"],
+                        "topic": meeting["topic"],
+                        "host_name": meeting["host_name"],
+                        "host_type": "Admin" if meeting["host_role"] == "admin" else "Teacher",
+                        "start_time": meeting["start_time"],
+                        "duration": meeting["duration"],
+                        "status": meeting["status"],
+                        "recording_url": meeting["recording_url"],
+                        "file_type": meeting["file_type"],
+                        "has_recording": meeting["recording_url"] is not None,
+                        "embed_code": f'<iframe src="{meeting["recording_url"]}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width: 100%; height: 400px;" sandbox="allow-same-origin allow-scripts"></iframe>' if meeting["recording_url"] else None
+                    }
+                    for meeting in past_meetings
+                ]
             }
-        },
-        "meetings": {
-            "upcoming": [
-                {
-                    "id": meeting["id"],
-                    "topic": meeting["topic"],
-                    "host_name": meeting["host_name"],
-                    "host_type": "Admin" if meeting["host_role"] == "admin" else "Teacher",
-                    "start_time": meeting["start_time"],
-                    "duration": meeting["duration"],
-                    "join_url": meeting["join_url"],
-                    "status": meeting["status"],
-                    "time_until_meeting": "Calculate client-side",
-                    "can_join": True  # Students can always see join link
-                }
-                for meeting in upcoming_meetings
-            ],
-            "past_with_recordings": [
-                {
-                    "id": meeting["id"],
-                    "topic": meeting["topic"],
-                    "host_name": meeting["host_name"],
-                    "host_type": "Admin" if meeting["host_role"] == "admin" else "Teacher",
-                    "start_time": meeting["start_time"],
-                    "duration": meeting["duration"],
-                    "status": meeting["status"],
-                    "recording_url": meeting["recording_url"],
-                    "file_type": meeting["file_type"],
-                    "has_recording": meeting["recording_url"] is not None,
-                    "embed_code": f'<iframe src="{meeting["recording_url"]}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width: 100%; height: 400px;" sandbox="allow-same-origin allow-scripts"></iframe>' if meeting["recording_url"] else None
-                }
-                for meeting in past_meetings
-            ]
         }
-    }
-    
-    if test_attempt:
-        dashboard_data["test_result"] = {
-            "attempt_id": test_attempt["id"],
-            "start_time": test_attempt["start_time"],
-            "end_time": test_attempt["end_time"],
-            "total_questions": test_attempt["total_questions"],
-            "correct_answers": test_attempt["correct_answers"],
-            "score_percentage": test_attempt["score_percentage"],
-            "result_prediction": test_attempt["result_status"],
-            "admin_approval": test_attempt["admin_approval"],
-            "admin_comments": test_attempt["admin_comments"],
-            "approved_at": test_attempt["approved_at"],
-            "final_status": "Pending Admin Review" if test_attempt["admin_approval"] == "pending" else 
-                           ("PASSED" if test_attempt["admin_approval"] == "approved" else "FAILED")
+        
+        # Add test result if there's a latest attempt
+        if latest_attempt:
+            dashboard_data["test_result"] = {
+                "attempt_id": latest_attempt["id"],
+                "start_time": latest_attempt["start_time"],
+                "end_time": latest_attempt["end_time"],
+                "total_questions": latest_attempt["total_questions"],
+                "correct_answers": latest_attempt["correct_answers"],
+                "score_percentage": latest_attempt["score_percentage"],
+                "result_prediction": latest_attempt["result_status"],
+                "admin_approval": latest_attempt["admin_approval"],
+                "admin_comments": latest_attempt["admin_comments"],
+                "approved_at": latest_attempt["approved_at"],
+                "final_status": "Pending Admin Review" if latest_attempt["admin_approval"] == "pending" else 
+                               ("PASSED" if latest_attempt["admin_approval"] == "approved" else "FAILED")
+            }
+        
+        return {
+            "success": True,
+            "message": "Student dashboard loaded successfully",
+            "data": dashboard_data
         }
+        
+    except sqlite3.OperationalError as e:
+        if "database is locked" in str(e):
+            raise HTTPException(
+                status_code=503, 
+                detail="Database is temporarily unavailable. Please try again in a moment."
+            )
+        else:
+            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     
-    return {
-        "success": True,
-        "message": "Student dashboard loaded successfully",
-        "data": dashboard_data
-    }
-
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+    
+    finally:
+        # Ensure proper cleanup
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 @app.get("/student/test")
 async def start_student_test(current_user: dict = Depends(verify_token)):
     """Get aptitude test questions for student"""
@@ -1880,12 +1975,17 @@ async def start_student_test(current_user: dict = Depends(verify_token)):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute('SELECT id FROM test_attempts WHERE user_id = ?', (current_user["sub"],))
-    existing_attempt = cursor.fetchone()
+    # Count existing attempts
+    cursor.execute('SELECT COUNT(*) as count FROM test_attempts WHERE user_id = ?', (current_user["sub"],))
+    attempt_count = cursor.fetchone()["count"]
     
-    if existing_attempt:
+    # Check max attempts
+    if attempt_count >= TEST_CONFIG["max_attempts"]:
         conn.close()
-        raise HTTPException(status_code=400, detail="You have already taken the aptitude test. You can only take it once.")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"You have already taken the aptitude test {attempt_count} times. Maximum {TEST_CONFIG['max_attempts']} attempts allowed."
+        )
     
     test_session_id = str(uuid.uuid4())
     attempt_id = str(uuid.uuid4())
@@ -1916,25 +2016,31 @@ async def start_student_test(current_user: dict = Depends(verify_token)):
     for question in questions:
         question.pop('correct_answer', None)
     
+    remaining_attempts = TEST_CONFIG["max_attempts"] - attempt_count - 1
+    
     return {
         "success": True,
-        "message": "Test questions loaded successfully",
+        "message": f"Test questions loaded successfully. {remaining_attempts} attempts remaining after this one.",
         "data": {
             "attempt_id": attempt_id,
             "test_session_id": test_session_id,
             "duration_minutes": TEST_CONFIG["duration_minutes"],
             "total_questions": len(questions),
             "questions": questions,
+            "current_attempt": attempt_count + 1,
+            "max_attempts": TEST_CONFIG["max_attempts"],
+            "remaining_attempts": remaining_attempts,
             "instructions": [
                 "You have 60 minutes to complete the test",
                 "There are 30 questions covering various subjects",
                 "Each question has only one correct answer",
-                "You can only take this test ONCE",
+                f"You can take this test up to {TEST_CONFIG['max_attempts']} times total",
                 "Your result will be reviewed by admin",
                 "Click 'Submit Test' when finished"
             ]
         }
     }
+
 @app.post("/student/test/submit")
 async def submit_test(
     test_data: TestSubmission,
